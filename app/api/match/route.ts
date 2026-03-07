@@ -57,13 +57,33 @@ export async function POST(request: NextRequest) {
       keywords: j.keywords,
     }));
 
-    const userPrompt = `Match these connections to the best-fit open role.
+    // Simplify connections — only pass id and headline to keep payload lean
+    const simplifiedConnections = connections.map((c: any) => ({
+      id: c.id,
+      headline: c.headline ?? c.title ?? "",
+    }));
+
+    // ----------------------------------------------------------------
+    // Batch connections to avoid hitting Claude's output token limit.
+    // With max_tokens=4096 and ~50 chars per result entry, ~50 connections
+    // per batch is safe and leaves room for reasoning text.
+    // ----------------------------------------------------------------
+    const BATCH_SIZE = 40;
+    const batches: Array<typeof simplifiedConnections> = [];
+    for (let i = 0; i < simplifiedConnections.length; i += BATCH_SIZE) {
+      batches.push(simplifiedConnections.slice(i, i + BATCH_SIZE));
+    }
+
+    const allMatches: any[] = [];
+
+    for (const batch of batches) {
+      const userPrompt = `Match these connections to the best-fit open role.
 
 Open Roles (id, title, keywords):
 ${JSON.stringify(simplifiedJobs, null, 2)}
 
 Connections to match (id, headline):
-${JSON.stringify(connections, null, 2)}
+${JSON.stringify(batch, null, 2)}
 
 For each connection, find the best-fit job id based on:
 - Keyword matches in their headline
@@ -78,52 +98,62 @@ Return a JSON array where each element has:
 
 Return ONLY the JSON array, no other text or markdown formatting.`;
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 4096,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: userPrompt }],
-      }),
-    });
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 4096,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: "user", content: userPrompt }],
+        }),
+      });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Claude API error:", errorText);
-      return NextResponse.json(
-        { error: `Claude API error: ${response.status}` },
-        { status: 500 }
-      );
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("Claude API error:", errorText);
+        return NextResponse.json(
+          { error: `Claude API error: ${response.status}` },
+          { status: 500 }
+        );
+      }
+
+      const data = await response.json();
+      const text = data.content[0].text;
+
+      // Parse the JSON response — robustly extract the JSON array regardless of surrounding text
+      let cleanText = text.trim();
+
+      // Strip markdown code fences (```json ... ``` or ``` ... ```)
+      cleanText = cleanText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+
+      // If there's still non-JSON preamble, find the first '[' to extract just the array
+      const arrayStart = cleanText.indexOf("[");
+      const arrayEnd = cleanText.lastIndexOf("]");
+      if (arrayStart !== -1 && arrayEnd !== -1 && arrayEnd > arrayStart) {
+        cleanText = cleanText.slice(arrayStart, arrayEnd + 1);
+      }
+
+      let batchMatches;
+      try {
+        batchMatches = JSON.parse(cleanText);
+      } catch (parseError: any) {
+        console.error("JSON parse error:", parseError.message);
+        console.error("Response text (first 800 chars):", text.substring(0, 800));
+        return NextResponse.json(
+          { error: `Failed to parse Claude response: ${parseError.message}` },
+          { status: 500 }
+        );
+      }
+
+      allMatches.push(...batchMatches);
     }
 
-    const data = await response.json();
-    const text = data.content[0].text;
-
-    // Parse the JSON response — handle potential markdown code blocks
-    let cleanText = text.trim();
-    if (cleanText.startsWith("```")) {
-      cleanText = cleanText.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
-    }
-
-    let matches;
-    try {
-      matches = JSON.parse(cleanText);
-    } catch (parseError: any) {
-      console.error("JSON parse error:", parseError.message);
-      console.error("Response text:", text.substring(0, 500)); // Log first 500 chars for debugging
-      return NextResponse.json(
-        { error: `Failed to parse Claude response: ${parseError.message}` },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json(matches);
+    return NextResponse.json(allMatches);
   } catch (error) {
     console.error("Match API error:", error);
     return NextResponse.json(
