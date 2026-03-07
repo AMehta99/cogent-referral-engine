@@ -27,13 +27,18 @@ export default function DashboardPage() {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) { router.push("/login"); return; }
 
-      const { data: profile } = await supabase
+      const { data: profile, error: profileError } = await supabase
         .from("profiles")
         .select("*")
         .eq("id", session.user.id)
         .single();
 
-      if (!profile) { router.push("/login"); return; }
+      // If profile row is missing (e.g. manually deleted), sign out and show login
+      if (profileError || !profile) {
+        await supabase.auth.signOut();
+        router.push("/login");
+        return;
+      }
       if (profile.role === "admin") { router.push("/admin"); return; }
 
       setUser(profile as Profile);
