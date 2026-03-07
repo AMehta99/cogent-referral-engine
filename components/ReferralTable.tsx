@@ -20,12 +20,15 @@ export default function ReferralTable({
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
+  // Guard: skip any referrals with missing joined data (e.g. dangling foreign keys)
+  const validReferrals = referrals.filter((r) => r.connection != null && r.job != null);
+
   // Get unique values for filter dropdowns
-  const roles = [...new Set(referrals.map((r) => r.job.title))];
-  const statuses = [...new Set(referrals.map((r) => r.status))];
+  const roles = [...new Set(validReferrals.map((r) => r.job.title))];
+  const statuses = [...new Set(validReferrals.map((r) => r.status))];
 
   // Apply filters
-  let filtered = referrals;
+  let filtered = validReferrals;
   if (roleFilter !== "all") {
     filtered = filtered.filter((r) => r.job.title === roleFilter);
   }
@@ -36,7 +39,7 @@ export default function ReferralTable({
   // Sort by composite score descending (default)
   filtered.sort((a, b) => b.composite_score - a.composite_score);
 
-  if (referrals.length === 0) {
+  if (validReferrals.length === 0) {
     return (
       <div className="text-center py-8 text-gray-500">
         <p>No referrals yet.</p>
