@@ -10,6 +10,41 @@ import ReferralTable from "@/components/ReferralTable";
 import ManualReferralForm from "@/components/ManualReferralForm";
 import type { Profile, Job, Connection, MatchResult, ReferralWithDetails } from "@/lib/types";
 
+type Tab = "readme" | "engine" | "dashboard";
+
+const HOW_IT_WORKS = [
+  {
+    emoji: "🔗",
+    title: "Export your LinkedIn network",
+    body: "Download your connections CSV from LinkedIn (Settings → Data Privacy → Get a copy of your data). This gives us your full network — names, titles, companies, and URLs.",
+  },
+  {
+    emoji: "🤖",
+    title: "AI scans every connection",
+    body: "Our engine reads each person's current title and experience, then scores them against every open role at Cogent. You don't have to manually filter anyone — AI handles the entire match.",
+  },
+  {
+    emoji: "🎯",
+    title: "Only the best matches surface",
+    body: "Candidates are ranked by fit score, role priority, headcount gap, and how much referral coverage a role already has. You only see people genuinely worth referring.",
+  },
+  {
+    emoji: "📋",
+    title: "You review and submit",
+    body: "You get to see why each person was matched before submitting. You're in control — submit the ones you vouch for, skip the rest. Your name is attached, so quality matters.",
+  },
+  {
+    emoji: "📬",
+    title: "The recruiting team takes it from here",
+    body: "Every submitted referral lands in the admin dashboard, ranked and ready. The recruiting team reviews the top candidates and reaches out — you'll see their progress in your dashboard.",
+  },
+  {
+    emoji: "💡",
+    title: "No LinkedIn access? No problem",
+    body: "You can also add people manually — just enter their name, current title, and LinkedIn URL. Claude will still score the fit and route them to the right role.",
+  },
+];
+
 export default function DashboardPage() {
   const router = useRouter();
   const [user, setUser] = useState<Profile | null>(null);
@@ -21,6 +56,7 @@ export default function DashboardPage() {
   const [isMatching, setIsMatching] = useState(false);
   const [submittingIds, setSubmittingIds] = useState<Set<string>>(new Set());
   const [submittedIds, setSubmittedIds] = useState<Set<string>>(new Set());
+  const [activeTab, setActiveTab] = useState<Tab>("readme");
 
   // Auth check and data load
   useEffect(() => {
@@ -34,7 +70,6 @@ export default function DashboardPage() {
         .eq("id", session.user.id)
         .single();
 
-      // If profile row is missing (e.g. manually deleted), sign out and show login
       if (profileError || !profile) {
         await supabase.auth.signOut();
         router.push("/login");
@@ -44,11 +79,9 @@ export default function DashboardPage() {
 
       setUser(profile as Profile);
 
-      // Load jobs
       const { data: jobsData } = await supabase.from("jobs").select("*");
       setJobs((jobsData || []) as Job[]);
 
-      // Load existing referrals
       await loadReferrals(session.user.id);
       setLoading(false);
     }
@@ -67,14 +100,12 @@ export default function DashboardPage() {
     }
   }
 
-  // Handle CSV upload
   const handleCSVUpload = useCallback(
     async (csvText: string) => {
       if (!user) return;
       setIsMatching(true);
 
       try {
-        // Parse CSV
         const parsed = parseLinkedInCSV(csvText, user.id);
 
         if (parsed.length === 0) {
@@ -83,7 +114,6 @@ export default function DashboardPage() {
           return;
         }
 
-        // Insert connections into Supabase
         const { data: insertedConnections, error: insertError } = await supabase
           .from("connections")
           .insert(parsed)
@@ -94,7 +124,6 @@ export default function DashboardPage() {
 
         setConnections(insertedConnections as Connection[]);
 
-        // Send to AI matching
         const connectionsForMatching = insertedConnections.map((c: any) => ({
           id: c.id,
           headline: c.headline,
@@ -122,7 +151,6 @@ export default function DashboardPage() {
         }
 
         const matchResults: MatchResult[] = await response.json();
-        // Only keep matches with fit_score >= 0.5 and a matched job
         const goodMatches = matchResults.filter(
           (m) => m.matched_job_id && m.fit_score >= 0.5
         );
@@ -137,7 +165,6 @@ export default function DashboardPage() {
     [user, jobs]
   );
 
-  // Submit a referral
   async function handleSubmitReferral(match: MatchResult) {
     if (!user || !match.matched_job_id) return;
 
@@ -147,7 +174,6 @@ export default function DashboardPage() {
       const job = jobs.find((j) => j.id === match.matched_job_id);
       if (!job) throw new Error("Job not found");
 
-      // Calculate composite score
       const scoreResponse = await fetch("/api/score", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -166,7 +192,6 @@ export default function DashboardPage() {
 
       const { composite_score } = await scoreResponse.json();
 
-      // Insert referral
       const { error: insertError } = await supabase.from("referrals").insert({
         connection_id: match.connection_id,
         job_id: match.matched_job_id,
@@ -180,8 +205,6 @@ export default function DashboardPage() {
       if (insertError) throw insertError;
 
       setSubmittedIds((prev) => new Set(prev).add(match.connection_id));
-
-      // Reload referrals
       await loadReferrals(user.id);
     } catch (error: any) {
       console.error("Submit error:", error);
@@ -195,7 +218,6 @@ export default function DashboardPage() {
     }
   }
 
-  // Bulk submit
   async function handleBulkSubmit() {
     const unsubmitted = matches.filter(
       (m) => m.matched_job_id && !submittedIds.has(m.connection_id)
@@ -205,11 +227,16 @@ export default function DashboardPage() {
     }
   }
 
-  // Sign out
   async function handleSignOut() {
     await supabase.auth.signOut();
     router.push("/login");
   }
+
+  const tabs: { id: Tab; label: string }[] = [
+    { id: "readme", label: "Read Me" },
+    { id: "engine", label: "Referral Engine" },
+    { id: "dashboard", label: "My Referral Dashboard" },
+  ];
 
   if (loading) {
     return (
@@ -226,79 +253,192 @@ export default function DashboardPage() {
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
           <div>
             <h1 className="text-lg font-bold text-gray-900">Cogent Referral Engine</h1>
-            <p className="text-xs text-gray-500">Welcome, {user?.full_name}</p>
+            <p className="text-xs text-gray-500">
+              AI-powered referrals from your network to drive Cogent&apos;s growth
+            </p>
           </div>
-          <button
-            onClick={handleSignOut}
-            className="text-sm text-gray-600 hover:text-gray-800"
-          >
-            Sign Out
-          </button>
+          <div className="flex items-center gap-4">
+            <span className="text-sm text-gray-600">{user?.full_name}</span>
+            <button
+              onClick={handleSignOut}
+              className="text-sm text-gray-600 hover:text-gray-800"
+            >
+              Sign Out
+            </button>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="max-w-5xl mx-auto px-4">
+          <nav className="flex gap-1">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                  activeTab === tab.id
+                    ? "border-blue-600 text-blue-600"
+                    : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-6 space-y-8">
-        {/* CSV Upload */}
-        <section>
-          <h2 className="text-lg font-semibold mb-3">Upload LinkedIn Connections</h2>
-          <CSVUploader onUpload={handleCSVUpload} isLoading={isMatching} />
-        </section>
+      <main className="max-w-5xl mx-auto px-4 py-8">
 
-        {/* Match Results */}
-        {matches.length > 0 && (
-          <section>
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-lg font-semibold">
-                AI Matches ({matches.filter((m) => m.matched_job_id).length} found)
-              </h2>
-              {matches.some((m) => !submittedIds.has(m.connection_id)) && (
-                <button
-                  onClick={handleBulkSubmit}
-                  className="px-4 py-1.5 text-sm font-medium bg-blue-600 text-white rounded-md hover:bg-blue-700"
+        {/* ── Tab 1: Read Me ── */}
+        {activeTab === "readme" && (
+          <div className="max-w-2xl mx-auto">
+            <div className="mb-8">
+              <h2 className="text-2xl font-bold text-gray-900">How the Referral Engine works</h2>
+              <p className="mt-2 text-gray-500 text-sm">
+                Your network is one of Cogent&apos;s most powerful recruiting assets. Here&apos;s exactly what
+                happens when you participate — and what we need from you.
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              {HOW_IT_WORKS.map((item, i) => (
+                <div
+                  key={i}
+                  className="flex gap-4 bg-white rounded-xl border border-gray-200 px-5 py-4 shadow-sm"
                 >
-                  Submit All Referrals
-                </button>
-              )}
+                  <span className="text-2xl mt-0.5 shrink-0">{item.emoji}</span>
+                  <div>
+                    <p className="font-semibold text-gray-900 text-sm">{item.title}</p>
+                    <p className="text-gray-500 text-sm mt-0.5 leading-relaxed">{item.body}</p>
+                  </div>
+                </div>
+              ))}
             </div>
-            <div className="space-y-3">
-              {matches
-                .filter((m) => m.matched_job_id)
-                .map((match) => {
-                  const connection = connections.find((c) => c.id === match.connection_id);
-                  const job = jobs.find((j) => j.id === match.matched_job_id);
-                  if (!connection || !job) return null;
-                  return (
-                    <MatchCard
-                      key={match.connection_id}
-                      connection={connection}
-                      job={job}
-                      match={match}
-                      onSubmit={() => handleSubmitReferral(match)}
-                      isSubmitting={submittingIds.has(match.connection_id)}
-                      isSubmitted={submittedIds.has(match.connection_id)}
-                    />
-                  );
-                })}
+
+            <div className="mt-8 bg-blue-50 border border-blue-100 rounded-xl px-5 py-4 text-sm text-blue-700">
+              <span className="font-semibold">Ready to start?</span> Head to the{" "}
+              <button
+                onClick={() => setActiveTab("engine")}
+                className="underline font-semibold hover:text-blue-900"
+              >
+                Referral Engine
+              </button>{" "}
+              tab to upload your network or add someone manually.
             </div>
-          </section>
+          </div>
         )}
 
-        {/* Previous Referrals */}
-        <section>
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-lg font-semibold">Your Referrals</h2>
-            {user && jobs.length > 0 && (
-              <ManualReferralForm
-                jobs={jobs}
-                userId={user.id}
-                onSuccess={() => loadReferrals(user.id)}
-              />
+        {/* ── Tab 2: Referral Engine ── */}
+        {activeTab === "engine" && (
+          <div className="space-y-8">
+            {/* Option 1: CSV */}
+            <section className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+              <div className="flex items-start justify-between mb-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">
+                      Option 1
+                    </span>
+                    <h2 className="text-base font-semibold text-gray-900">Upload your LinkedIn connections</h2>
+                  </div>
+                  <p className="text-sm text-gray-500 mt-1">
+                    The fastest way to surface matches. Export your full network from LinkedIn and drop the
+                    CSV here — AI will scan every connection against all open roles automatically.
+                  </p>
+                </div>
+              </div>
+              <div className="text-xs text-gray-400 mb-3">
+                LinkedIn → Settings &amp; Privacy → Data Privacy → Get a copy of your data → Connections
+              </div>
+              <CSVUploader onUpload={handleCSVUpload} isLoading={isMatching} />
+            </section>
+
+            {/* Match Results */}
+            {matches.length > 0 && (
+              <section>
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="text-base font-semibold text-gray-900">
+                    AI Matches — {matches.filter((m) => m.matched_job_id).length} found
+                  </h2>
+                  {matches.some((m) => !submittedIds.has(m.connection_id)) && (
+                    <button
+                      onClick={handleBulkSubmit}
+                      className="px-4 py-1.5 text-sm font-medium bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                    >
+                      Submit All Referrals
+                    </button>
+                  )}
+                </div>
+                <div className="space-y-3">
+                  {matches
+                    .filter((m) => m.matched_job_id)
+                    .map((match) => {
+                      const connection = connections.find((c) => c.id === match.connection_id);
+                      const job = jobs.find((j) => j.id === match.matched_job_id);
+                      if (!connection || !job) return null;
+                      return (
+                        <MatchCard
+                          key={match.connection_id}
+                          connection={connection}
+                          job={job}
+                          match={match}
+                          onSubmit={() => handleSubmitReferral(match)}
+                          isSubmitting={submittingIds.has(match.connection_id)}
+                          isSubmitted={submittedIds.has(match.connection_id)}
+                        />
+                      );
+                    })}
+                </div>
+              </section>
             )}
+
+            {/* Option 2: Manual */}
+            <section className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+              <div className="flex items-start justify-between">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs font-bold uppercase tracking-wider text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full">
+                      Option 2
+                    </span>
+                    <h2 className="text-base font-semibold text-gray-900">Add someone manually</h2>
+                  </div>
+                  <p className="text-sm text-gray-500">
+                    Know someone great but don&apos;t want to export your whole network? Add them directly.
+                    We ask for their current title instead of scraping LinkedIn — it keeps things fast
+                    and avoids any data privacy issues.
+                  </p>
+                </div>
+                {user && jobs.length > 0 && (
+                  <div className="ml-6 shrink-0">
+                    <ManualReferralForm
+                      jobs={jobs}
+                      userId={user.id}
+                      onSuccess={() => loadReferrals(user.id)}
+                    />
+                  </div>
+                )}
+              </div>
+            </section>
           </div>
-          <div className="bg-white rounded-lg border border-gray-200 p-4">
-            <ReferralTable referrals={referrals} />
+        )}
+
+        {/* ── Tab 3: My Referral Dashboard ── */}
+        {activeTab === "dashboard" && (
+          <div>
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold text-gray-900">My Referral Dashboard</h2>
+              <p className="text-sm text-gray-500 mt-0.5">
+                Track the people you&apos;ve referred and where they are in the process. This view is read-only —
+                the recruiting team manages status updates.
+              </p>
+            </div>
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+              <ReferralTable referrals={referrals} />
+            </div>
           </div>
-        </section>
+        )}
+
       </main>
     </div>
   );
