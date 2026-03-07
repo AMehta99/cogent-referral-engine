@@ -50,18 +50,30 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Simplify job data to avoid JSON parsing issues with special characters in descriptions
+    const simplifiedJobs = jobs.map((j: any) => ({
+      id: j.id,
+      title: j.title,
+      keywords: j.keywords,
+    }));
+
     const userPrompt = `Match these connections to the best-fit open role.
 
-Open Roles:
-${JSON.stringify(jobs, null, 2)}
+Open Roles (id, title, keywords):
+${JSON.stringify(simplifiedJobs, null, 2)}
 
-Connections to match:
+Connections to match (id, headline):
 ${JSON.stringify(connections, null, 2)}
+
+For each connection, find the best-fit job id based on:
+- Keyword matches in their headline
+- Seniority alignment
+- Domain relevance
 
 Return a JSON array where each element has:
 - connection_id: the connection's id
 - matched_job_id: the best-fit job id (or null if no good match)
-- fit_score: 0 to 1
+- fit_score: 0 to 1 (0.5+ is decent, 0.7+ is strong, 0.9+ is exceptional)
 - reasoning: one sentence explaining the match
 
 Return ONLY the JSON array, no other text or markdown formatting.`;
@@ -99,7 +111,18 @@ Return ONLY the JSON array, no other text or markdown formatting.`;
       cleanText = cleanText.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
     }
 
-    const matches = JSON.parse(cleanText);
+    let matches;
+    try {
+      matches = JSON.parse(cleanText);
+    } catch (parseError: any) {
+      console.error("JSON parse error:", parseError.message);
+      console.error("Response text:", text.substring(0, 500)); // Log first 500 chars for debugging
+      return NextResponse.json(
+        { error: `Failed to parse Claude response: ${parseError.message}` },
+        { status: 500 }
+      );
+    }
+
     return NextResponse.json(matches);
   } catch (error) {
     console.error("Match API error:", error);
