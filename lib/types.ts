@@ -29,6 +29,7 @@ export interface Job {
   filled: number;
   description: string | null;
   keywords: string[];
+  ashby_id?: string | null;
   created_at: string;
 }
 

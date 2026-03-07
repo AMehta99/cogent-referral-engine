@@ -7,6 +7,7 @@ import { parseLinkedInCSV } from "@/lib/csv-parser";
 import CSVUploader from "@/components/CSVUploader";
 import MatchCard from "@/components/MatchCard";
 import ReferralTable from "@/components/ReferralTable";
+import ManualReferralForm from "@/components/ManualReferralForm";
 import type { Profile, Job, Connection, MatchResult, ReferralWithDetails } from "@/lib/types";
 
 export default function DashboardPage() {
@@ -284,7 +285,16 @@ export default function DashboardPage() {
 
         {/* Previous Referrals */}
         <section>
-          <h2 className="text-lg font-semibold mb-3">Your Referrals</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-semibold">Your Referrals</h2>
+            {user && jobs.length > 0 && (
+              <ManualReferralForm
+                jobs={jobs}
+                userId={user.id}
+                onSuccess={() => loadReferrals(user.id)}
+              />
+            )}
+          </div>
           <div className="bg-white rounded-lg border border-gray-200 p-4">
             <ReferralTable referrals={referrals} />
           </div>
