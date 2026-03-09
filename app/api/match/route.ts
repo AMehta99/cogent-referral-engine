@@ -4,12 +4,18 @@ import { NextRequest, NextResponse } from "next/server";
  * POST /api/match
  *
  * Receives a batch of connections + jobs, calls Claude API to match them.
- * Batches are processed in parallel to stay well within Vercel's timeout.
+ * Batches are processed through a concurrency-limited pool to stay within
+ * API rate limits while still running faster than pure sequential execution.
  * Returns an array of MatchResult objects.
  */
 
 // Increase Vercel function timeout to maximum allowed on Hobby plan
 export const maxDuration = 60;
+
+// Maximum number of simultaneous in-flight Claude API requests.
+// Keeps us under the concurrent-connections rate limit while still
+// processing multiple batches at once.
+const MAX_CONCURRENCY = 5;
 
 const SYSTEM_PROMPT = `You are a recruiting assistant for Cogent, a Series A AI startup.
 Your task is to match LinkedIn connections to open roles across any function — engineering,
@@ -28,8 +34,37 @@ Be selective — only suggest strong matches. A fit_score of 0.5 means borderlin
 If someone clearly doesn't match any open role, return null for matched_job_id with a score of 0.`;
 
 // ------------------------------------------------------------------
+// Concurrency-limited pool.
+// Runs up to maxConcurrency tasks simultaneously. As each task
+// finishes it immediately picks up the next one, keeping the pool
+// full until all work is done. Order of results is preserved.
+// ------------------------------------------------------------------
+async function runWithConcurrency<T>(
+  tasks: Array<() => Promise<T>>,
+  maxConcurrency: number
+): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < tasks.length) {
+      const index = nextIndex++;
+      results[index] = await tasks[index]();
+    }
+  }
+
+  // Spin up exactly min(maxConcurrency, tasks.length) workers
+  const workers = Array.from(
+    { length: Math.min(maxConcurrency, tasks.length) },
+    () => worker()
+  );
+  await Promise.all(workers);
+
+  return results;
+}
+
+// ------------------------------------------------------------------
 // Process a single batch of connections against all jobs.
-// Extracted so it can be called concurrently via Promise.all.
 // ------------------------------------------------------------------
 async function processBatch(
   batch: Array<{ id: string; headline: string }>,
@@ -134,9 +169,10 @@ export async function POST(request: NextRequest) {
 
     // ----------------------------------------------------------------
     // Batch size of 100 keeps each prompt well within Claude's output
-    // token limit. All batches are fired in parallel so total latency
-    // equals the slowest single batch (~5-10s) rather than the sum.
-    // 1,253 connections → ~13 parallel calls instead of 32 sequential.
+    // token limit. Batches run through a pool capped at MAX_CONCURRENCY
+    // concurrent requests — fast enough to finish within 60s, safe
+    // enough to stay under the API's concurrent connection limit.
+    // 1,253 connections → 13 batches → ~3 waves of 5 = ~24s total.
     // ----------------------------------------------------------------
     const BATCH_SIZE = 100;
     const batches: Array<typeof simplifiedConnections> = [];
@@ -144,12 +180,15 @@ export async function POST(request: NextRequest) {
       batches.push(simplifiedConnections.slice(i, i + BATCH_SIZE));
     }
 
-    console.log(`Processing ${simplifiedConnections.length} connections across ${batches.length} parallel batches`);
-
-    const batchResults = await Promise.all(
-      batches.map((batch) => processBatch(batch, simplifiedJobs, apiKey))
+    console.log(
+      `Processing ${simplifiedConnections.length} connections across ${batches.length} batches (max ${MAX_CONCURRENCY} concurrent)`
     );
 
+    const tasks = batches.map(
+      (batch) => () => processBatch(batch, simplifiedJobs, apiKey)
+    );
+
+    const batchResults = await runWithConcurrency(tasks, MAX_CONCURRENCY);
     const allMatches = batchResults.flat();
 
     return NextResponse.json(allMatches);
