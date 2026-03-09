@@ -54,6 +54,7 @@ export default function DashboardPage() {
   const [referrals, setReferrals] = useState<ReferralWithDetails[]>([]);
   const [loading, setLoading] = useState(true);
   const [isMatching, setIsMatching] = useState(false);
+  const [matchingStatus, setMatchingStatus] = useState<string>("");
   const [submittingIds, setSubmittingIds] = useState<Set<string>>(new Set());
   const [submittedIds, setSubmittedIds] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState<Tab>("readme");
@@ -104,6 +105,7 @@ export default function DashboardPage() {
     async (csvText: string) => {
       if (!user) return;
       setIsMatching(true);
+      setMatchingStatus("Parsing connections...");
 
       try {
         const parsed = parseLinkedInCSV(csvText, user.id);
@@ -111,8 +113,11 @@ export default function DashboardPage() {
         if (parsed.length === 0) {
           alert("No valid connections found in the CSV. Ensure rows have Position and URL fields.");
           setIsMatching(false);
+          setMatchingStatus("");
           return;
         }
+
+        setMatchingStatus(`Saving ${parsed.length} connections...`);
 
         const { data: insertedConnections, error: insertError } = await supabase
           .from("connections")
@@ -129,12 +134,16 @@ export default function DashboardPage() {
           headline: c.headline,
         }));
 
+        // Always use the live jobs list fetched from the database at load time.
+        // When jobs are added/updated, the user refreshes the page to pick up changes.
         const jobsForMatching = jobs.map((j) => ({
           id: j.id,
           title: j.title,
-          description: j.description,
+          department: (j as any).department ?? "",
           keywords: j.keywords,
         }));
+
+        setMatchingStatus(`Submitting ${insertedConnections.length} connections for AI matching...`);
 
         const response = await fetch("/api/match", {
           method: "POST",
@@ -147,19 +156,56 @@ export default function DashboardPage() {
 
         if (!response.ok) {
           const err = await response.json();
-          throw new Error(err.error || "Matching failed");
+          throw new Error(err.error || "Failed to create batch job");
         }
 
-        const matchResults: MatchResult[] = await response.json();
-        const goodMatches = matchResults.filter(
-          (m) => m.matched_job_id && m.fit_score >= 0.5
-        );
-        setMatches(goodMatches);
+        const { batchId } = await response.json();
+
+        // ------------------------------------------------------------------
+        // Poll /api/match/status until the batch is complete.
+        // Anthropic batch jobs typically finish in 1–5 minutes.
+        // We poll every 5 seconds for up to 10 minutes.
+        // ------------------------------------------------------------------
+        const MAX_POLLS = 120; // 10 min at 5s intervals
+        let polls = 0;
+
+        while (polls < MAX_POLLS) {
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          polls++;
+
+          const statusRes = await fetch(`/api/match/status?batchId=${batchId}`);
+          if (!statusRes.ok) throw new Error("Failed to check batch status");
+
+          const statusData = await statusRes.json();
+
+          if (statusData.status === "processing") {
+            const counts = statusData.requestCounts;
+            if (counts) {
+              const done = (counts.succeeded ?? 0) + (counts.errored ?? 0);
+              const total = insertedConnections.length;
+              setMatchingStatus(`AI matching in progress… (${done} / ${total} analyzed)`);
+            }
+            continue;
+          }
+
+          if (statusData.status === "ended") {
+            const goodMatches = (statusData.matches as MatchResult[]).filter(
+              (m) => m.matched_job_id && m.fit_score >= 0.5
+            );
+            setMatches(goodMatches);
+            break;
+          }
+        }
+
+        if (polls >= MAX_POLLS) {
+          throw new Error("Matching timed out after 10 minutes. Please try again.");
+        }
       } catch (error: any) {
         console.error("Upload/match error:", error);
         alert(`Error: ${error.message}`);
       } finally {
         setIsMatching(false);
+        setMatchingStatus("");
       }
     },
     [user, jobs]
@@ -352,6 +398,11 @@ export default function DashboardPage() {
                 LinkedIn → Settings &amp; Privacy → Data Privacy → Get a copy of your data → Connections
               </div>
               <CSVUploader onUpload={handleCSVUpload} isLoading={isMatching} />
+              {isMatching && matchingStatus && (
+                <p className="text-sm text-gray-500 mt-3 text-center animate-pulse">
+                  {matchingStatus}
+                </p>
+              )}
             </section>
 
             {/* Match Results */}
