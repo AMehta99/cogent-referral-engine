@@ -4,14 +4,27 @@ import type { LinkedInCSVRow, Connection } from "./types";
 /**
  * Parse a LinkedIn connections CSV export into structured Connection objects.
  *
- * LinkedIn CSV columns: First Name, Last Name, URL, Company, Position, Connected On
+ * LinkedIn's official export prepends a multi-line "Notes:" preamble before
+ * the real headers. We strip everything above the line that starts with
+ * "First Name" so PapaParse sees a clean CSV.
+ *
+ * LinkedIn CSV columns: First Name, Last Name, URL, Email Address, Company, Position, Connected On
  * Rows with empty Position or URL are ignored per spec.
  */
 export function parseLinkedInCSV(
   csvText: string,
   userId: string
 ): Omit<Connection, "id" | "uploaded_at">[] {
-  const result = Papa.parse<LinkedInCSVRow>(csvText, {
+  // Find the line that contains the real headers and slice from there.
+  // LinkedIn exports always start the data section with "First Name".
+  const lines = csvText.split("\n");
+  const headerLineIndex = lines.findIndex((line) =>
+    line.trim().startsWith("First Name")
+  );
+  const cleanedCsv =
+    headerLineIndex >= 0 ? lines.slice(headerLineIndex).join("\n") : csvText;
+
+  const result = Papa.parse<LinkedInCSVRow>(cleanedCsv, {
     header: true,
     skipEmptyLines: true,
     transformHeader: (h) => h.trim(),
