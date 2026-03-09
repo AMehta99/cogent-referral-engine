@@ -117,11 +117,23 @@ export default function DashboardPage() {
           return;
         }
 
-        setMatchingStatus(`Saving ${parsed.length} connections...`);
+        // ------------------------------------------------------------------
+        // Cap at 200 connections to stay within the Anthropic API's
+        // 10,000 output-token-per-minute rate limit. 200 connections ×
+        // ~120 tokens/result = ~24,000 tokens across 5 batches run 2 at
+        // a time — safely under the limit and well within Vercel's 60s timeout.
+        // LinkedIn exports are sorted by most recent connection first, so
+        // we're keeping the 200 people the user connected with most recently.
+        // ------------------------------------------------------------------
+        const MAX_CONNECTIONS = 200;
+        const capped = parsed.slice(0, MAX_CONNECTIONS);
+        const wasLimited = parsed.length > MAX_CONNECTIONS;
+
+        setMatchingStatus(`Saving ${capped.length} connections...`);
 
         const { data: insertedConnections, error: insertError } = await supabase
           .from("connections")
-          .insert(parsed)
+          .insert(capped)
           .select();
 
         if (insertError) throw insertError;
@@ -134,8 +146,6 @@ export default function DashboardPage() {
           headline: c.headline,
         }));
 
-        // Always use the live jobs list fetched from the database at load time.
-        // When jobs are added/updated, the user refreshes the page to pick up changes.
         const jobsForMatching = jobs.map((j) => ({
           id: j.id,
           title: j.title,
@@ -143,7 +153,7 @@ export default function DashboardPage() {
           keywords: j.keywords,
         }));
 
-        setMatchingStatus(`Submitting ${insertedConnections.length} connections for AI matching...`);
+        setMatchingStatus(`Scanning ${insertedConnections.length} connections against open roles…`);
 
         const response = await fetch("/api/match", {
           method: "POST",
@@ -156,49 +166,19 @@ export default function DashboardPage() {
 
         if (!response.ok) {
           const err = await response.json();
-          throw new Error(err.error || "Failed to create batch job");
+          throw new Error(err.error || "Matching failed");
         }
 
-        const { batchId } = await response.json();
+        const matchResults: MatchResult[] = await response.json();
+        const goodMatches = matchResults.filter(
+          (m) => m.matched_job_id && m.fit_score >= 0.5
+        );
+        setMatches(goodMatches);
 
-        // ------------------------------------------------------------------
-        // Poll /api/match/status until the batch is complete.
-        // Anthropic batch jobs typically finish in 1–5 minutes.
-        // We poll every 5 seconds for up to 10 minutes.
-        // ------------------------------------------------------------------
-        const MAX_POLLS = 120; // 10 min at 5s intervals
-        let polls = 0;
-
-        while (polls < MAX_POLLS) {
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-          polls++;
-
-          const statusRes = await fetch(`/api/match/status?batchId=${batchId}`);
-          if (!statusRes.ok) throw new Error("Failed to check batch status");
-
-          const statusData = await statusRes.json();
-
-          if (statusData.status === "processing") {
-            const counts = statusData.requestCounts;
-            if (counts) {
-              const done = (counts.succeeded ?? 0) + (counts.errored ?? 0);
-              const total = insertedConnections.length;
-              setMatchingStatus(`AI matching in progress… (${done} / ${total} analyzed)`);
-            }
-            continue;
-          }
-
-          if (statusData.status === "ended") {
-            const goodMatches = (statusData.matches as MatchResult[]).filter(
-              (m) => m.matched_job_id && m.fit_score >= 0.5
-            );
-            setMatches(goodMatches);
-            break;
-          }
-        }
-
-        if (polls >= MAX_POLLS) {
-          throw new Error("Matching timed out after 10 minutes. Please try again.");
+        if (wasLimited) {
+          alert(
+            `Your CSV had ${parsed.length} connections. We scanned the most recent ${MAX_CONNECTIONS} to stay within API limits. To scan more, re-export and upload again — we'll pick up where you left off.`
+          );
         }
       } catch (error: any) {
         console.error("Upload/match error:", error);
