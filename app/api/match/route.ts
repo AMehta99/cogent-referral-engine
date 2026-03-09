@@ -11,9 +11,9 @@ import { NextRequest, NextResponse } from "next/server";
 export const maxDuration = 60;
 
 // MAX_CONCURRENCY × max_tokens must stay under 10,000 (the output TPM limit).
-// 2 × 4,096 = 8,192 — safely under the limit with room to spare.
-// BATCH_SIZE=25: 200 connections / 25 = 8 batches, 4 waves × ~12s ≈ 48s (under 60s timeout).
-const MAX_CONCURRENCY = 2;
+// 3 × 3,000 = 9,000 — safely under the limit.
+// BATCH_SIZE=25: 200 connections / 25 = 8 batches, 3 waves × ~12s ≈ 36s (well under 60s timeout).
+const MAX_CONCURRENCY = 3;
 const BATCH_SIZE = 25;
 
 const SYSTEM_PROMPT = `You are a recruiting assistant for Cogent Security, an Applied AI Lab building AI agents for cybersecurity.
@@ -95,7 +95,7 @@ Escape any double quotes inside strings with a backslash.`;
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 4096,
+      max_tokens: 3000,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userPrompt }],
     }),
