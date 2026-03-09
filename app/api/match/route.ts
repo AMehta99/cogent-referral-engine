@@ -12,8 +12,9 @@ export const maxDuration = 60;
 
 // MAX_CONCURRENCY × max_tokens must stay under 10,000 (the output TPM limit).
 // 2 × 4,096 = 8,192 — safely under the limit with room to spare.
+// BATCH_SIZE=25: 200 connections / 25 = 8 batches, 4 waves × ~12s ≈ 48s (under 60s timeout).
 const MAX_CONCURRENCY = 2;
-const BATCH_SIZE = 40;
+const BATCH_SIZE = 25;
 
 const SYSTEM_PROMPT = `You are a recruiting assistant for Cogent Security, an Applied AI Lab building AI agents for cybersecurity.
 
@@ -79,9 +80,11 @@ Return a JSON array where each element has:
 - connection_id: the connection's id
 - matched_job_id: the best-fit job id (or null if no meaningful match)
 - fit_score: 0 to 1 (0.5+ decent, 0.7+ strong, 0.9+ exceptional)
-- reasoning: one sentence explaining the match
+- reasoning: one short sentence (no quotes, no special characters, plain ASCII only)
 
-Return ONLY the JSON array, no markdown or extra text.`;
+IMPORTANT: Return ONLY a valid JSON array. No markdown, no code fences, no extra text.
+All string values must use only plain ASCII characters — no curly quotes, em dashes, or non-ASCII symbols.
+Escape any double quotes inside strings with a backslash.`;
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -112,17 +115,40 @@ Return ONLY the JSON array, no markdown or extra text.`;
     .replace(/\s*```$/, "")
     .trim();
 
+  // Extract the outermost JSON array
   const arrayStart = cleanText.indexOf("[");
   const arrayEnd = cleanText.lastIndexOf("]");
   if (arrayStart !== -1 && arrayEnd !== -1 && arrayEnd > arrayStart) {
     cleanText = cleanText.slice(arrayStart, arrayEnd + 1);
   }
 
+  // Sanitize: replace curly/smart quotes with straight ones, strip non-ASCII
+  cleanText = cleanText
+    .replace(/[\u2018\u2019]/g, "'")   // curly single quotes
+    .replace(/[\u201C\u201D]/g, '"')   // curly double quotes
+    .replace(/\u2013|\u2014/g, "-")    // en/em dashes
+    .replace(/[^\x00-\x7F]/g, "");    // strip remaining non-ASCII
+
   try {
     return JSON.parse(cleanText);
   } catch (parseError: any) {
     console.error("JSON parse error in batch:", parseError.message);
     console.error("Response text (first 500 chars):", text.substring(0, 500));
+    // Last resort: try to recover valid objects from partial JSON
+    const recovered: any[] = [];
+    const objPattern = /\{[^{}]*"connection_id"[^{}]*\}/g;
+    let match;
+    while ((match = objPattern.exec(cleanText)) !== null) {
+      try {
+        recovered.push(JSON.parse(match[0]));
+      } catch {
+        // skip unparseable fragment
+      }
+    }
+    if (recovered.length > 0) {
+      console.log(`Recovered ${recovered.length} results from partial JSON`);
+      return recovered;
+    }
     return [];
   }
 }
